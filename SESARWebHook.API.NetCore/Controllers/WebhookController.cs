@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using SecureExchangesSDK.Models.Transport;
 using SESARWebHook.Core.Models;
@@ -22,11 +23,13 @@ namespace SESARWebHook.API.Controllers
   {
     private readonly StartupConfig _config;
     private readonly IConfiguration _appConfig;
+    private readonly ILogger<WebhookController> _logger;
 
-    public WebhookController(StartupConfig config, IConfiguration appConfig)
+    public WebhookController(StartupConfig config, IConfiguration appConfig, ILogger<WebhookController> logger)
     {
       _config = config;
       _appConfig = appConfig;
+      _logger = logger;
     }
 
     [HttpPost("")]
@@ -303,12 +306,19 @@ namespace SESARWebHook.API.Controllers
 
       if (result.Success)
       {
+        _logger.LogInformation(
+            "Webhook traite. Connecteur={ConnectorId} Message={Message} Traites={ItemsProcessed}",
+            connectorId, result.Message, result.ItemsProcessed);
         return Ok(result);
       }
-      else
-      {
-        return StatusCode(500, result);
-      }
+
+      // Journal serveur : c'est ici que le detail des echecs (fichier manquant, dechiffrement en
+      // echec, .eml non ecrit) est visible. SESAR ne lit pas le corps de la reponse : sur un 500,
+      // il conserve son fichier de file d'attente et reessaie a la prochaine boucle.
+      _logger.LogError(
+          "Echec du webhook. Connecteur={ConnectorId} Message={Message} Echecs={ItemsFailed} Detail={ErrorDetails}",
+          connectorId, result.Message, result.ItemsFailed, result.ErrorDetails);
+      return StatusCode(500, result);
     }
   }
 }

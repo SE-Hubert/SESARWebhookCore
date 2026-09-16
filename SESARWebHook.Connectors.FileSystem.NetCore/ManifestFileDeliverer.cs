@@ -38,13 +38,13 @@ namespace SESARWebHook.Connectors.FileSystem
 
       for (int i = 0; i < locations.Count; i++)
       {
-        var sourcePath = locations[i]?.FullPath;
+        var sourcePath = ResolveSourcePath(manifest, i);
 
         try
         {
           if (string.IsNullOrWhiteSpace(sourcePath))
           {
-            throw new FileNotFoundException("manifest entry has no FullPath");
+            throw new FileNotFoundException("manifest entry has neither FullPath nor FileName");
           }
 
           var targetName = SafePaths.MakeUniqueFileName(filesFolder, ResolveTargetFileName(manifest, i, sourcePath), usedNames);
@@ -76,6 +76,34 @@ namespace SESARWebHook.Connectors.FileSystem
       }
 
       return report;
+    }
+
+    /// <summary>
+    /// Chemin source du fichier : FullPath de l'entree quand SESAR l'a rempli, sinon
+    /// DirectoryPath + FileName. SESAR laisse FullPath vide (et IsDownloaded a false) pour un
+    /// fichier dont le contenu est identique a un autre du meme envoi, alors que son .secf est bien
+    /// present dans le dossier de l'echange. Retourne null si aucun chemin ne peut etre construit.
+    /// </summary>
+    private static string ResolveSourcePath(StoreManifest manifest, int index)
+    {
+      var location = manifest.FilesLocation[index];
+      if (location == null)
+      {
+        return null;
+      }
+
+      if (!string.IsNullOrWhiteSpace(location.FullPath))
+      {
+        return location.FullPath;
+      }
+
+      var fileName = SafePaths.SanitizeFileName(location.FileName);
+      if (string.IsNullOrWhiteSpace(manifest.DirectoryPath) || string.IsNullOrEmpty(fileName))
+      {
+        return null;
+      }
+
+      return Path.Combine(manifest.DirectoryPath, fileName);
     }
 
     /// <summary>

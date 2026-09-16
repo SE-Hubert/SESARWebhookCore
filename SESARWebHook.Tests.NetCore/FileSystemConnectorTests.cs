@@ -407,7 +407,9 @@ namespace SESARWebHook.Tests
       var eml = LoadEml(result);
       Assert.AreEqual("Envoi fictif", eml.Subject);
       Assert.AreEqual("expediteur@exemple.test", eml.From.Mailboxes.Single().Address);
-      Assert.AreEqual("destinataire@exemple.test", eml.To.Mailboxes.Single().Address);
+      Assert.AreEqual("destinataire@exemple.test", eml.Bcc.Mailboxes.Single().Address, "recipients must be in Bcc");
+      Assert.AreEqual(0, eml.To.Count, "To must stay empty");
+      Assert.AreEqual(0, eml.Cc.Count, "Cc must stay empty");
 
       var attachments = eml.Attachments.OfType<MimePart>().ToList();
       Assert.AreEqual(2, attachments.Count);
@@ -415,23 +417,109 @@ namespace SESARWebHook.Tests
       CollectionAssert.AreEqual(contentB, AttachmentBytes(attachments.Single(p => p.FileName == "Annexe fictive.xlsx")));
     }
 
+    /// <summary>Reproduit la structure reelle d'un EmailSent.html SESAR : resume, premiere copie, marqueur, message original.</summary>
+    private const string SesarEmailSentHtml =
+      "<p style='padding:2px; margin:1px;'><strong>From</strong>: expediteur@exemple.test</p>" +
+      "<p style='padding:2px; margin:1px;'><strong>To</strong>: destinataire@exemple.test</p>" +
+      "<p style='padding:2px; margin:1px;'><strong>Subject</strong>: Corps fictif</p>" +
+      "<p style='padding:2px; margin:1px;'><strong>Date</strong>: 16-09-2026 14:11 GMT +00:00</p>" +
+      "<body><div>PREMIERE COPIE A ECARTER</div><div id=\"Signature\">Signature copie</div></body>" +
+      "<hr/>ORIGINAL HTML ENCODED MESSAGE BELOW<hr/><br />" +
+      "<body><div class=\"elementToProof\">Message original fictif.</div><div id=\"Signature\">Signature originale</div></body>";
+
     [TestMethod]
-    public async Task ProcessManifest_Eml_BodyComesFromEmailSentHtml()
+    public async Task ProcessManifest_Eml_BodyIsTheOriginalMessageAfterMarker()
     {
       var messageDir = Path.Combine(_sourceDir, "message");
       Directory.CreateDirectory(messageDir);
-      File.WriteAllText(Path.Combine(messageDir, "EmailSent.html"),
-        "<html><body><p>Bonjour, message fictif.</p><hr />ORIGINAL HTML ENCODED MESSAGE BELOW\r\nSGVsbG8=\r\n</body></html>");
+      File.WriteAllText(Path.Combine(messageDir, "EmailSent.html"), SesarEmailSentHtml);
 
       var manifest = new StoreManifest { DirectoryPath = messageDir, OriginalRecipientInfo = NewInfo("Corps fictif") };
 
       var result = await _emlConnector.ProcessManifestAsync(manifest, NewContext());
 
       Assert.IsTrue(result.Success, result.Message + " / " + result.ErrorDetails);
-      var eml = LoadEml(result);
-      StringAssert.Contains(eml.HtmlBody, "message fictif");
-      Assert.IsFalse(eml.HtmlBody.Contains("ORIGINAL HTML ENCODED MESSAGE BELOW"), "encoded original must be stripped");
-      Assert.IsFalse(eml.HtmlBody.Contains("SGVsbG8="), "encoded original must be stripped");
+      var body = LoadEml(result).HtmlBody;
+      StringAssert.StartsWith(body, "<body>", "body must start at the original message");
+      StringAssert.Contains(body, "Message original fictif.");
+      StringAssert.Contains(body, "Signature originale");
+      Assert.IsFalse(body.Contains("PREMIERE COPIE A ECARTER"), "first copy must be dropped");
+      Assert.IsFalse(body.Contains("<strong>From</strong>"), "summary header block must be dropped");
+      Assert.IsFalse(body.Contains("ORIGINAL HTML ENCODED MESSAGE BELOW"), "marker must be dropped");
+      Assert.IsFalse(body.Contains("<hr"), "marker rules must be dropped");
+    }
+
+    /// <summary>Bloc resume From/To/Subject/Date tel que SESAR le place en tete du HTML.</summary>
+    private const string SesarSummaryHeader =
+      "<p style='padding:2px; margin:1px;'><strong>From</strong>: expediteur@exemple.test</p>" +
+      "<p style='padding:2px; margin:1px;'><strong>To</strong>: a@exemple.test,b@exemple.test</p>" +
+      "<p style='padding:2px; margin:1px;'><strong>Subject</strong>: asdasd</p>" +
+      "<p style='padding:2px; margin:1px;'><strong>Date</strong>: 15-09-2026 20:41 GMT +00:00</p>";
+
+    private async Task<string> HtmlBodyFor(string emailSentHtml)
+    {
+      var messageDir = Path.Combine(_sourceDir, "message");
+      Directory.CreateDirectory(messageDir);
+      File.WriteAllText(Path.Combine(messageDir, "EmailSent.html"), emailSentHtml);
+
+      var manifest = new StoreManifest { DirectoryPath = messageDir, OriginalRecipientInfo = NewInfo("Corps") };
+      var result = await _emlConnector.ProcessManifestAsync(manifest, NewContext());
+
+      Assert.IsTrue(result.Success, result.Message + " / " + result.ErrorDetails);
+      return LoadEml(result).HtmlBody;
+    }
+
+    [TestMethod]
+    public async Task ProcessManifest_Eml_EncodedOriginalAfterMarker_IsDecoded()
+    {
+      // Cas observe : le message original est encode en entites et s'affiche avec ses balises visibles
+      var body = await HtmlBodyFor(SesarSummaryHeader + "<body>asdasd</body>" +
+        "<hr/>ORIGINAL HTML ENCODED MESSAGE BELOW<hr/><br />&lt;p&gt;Message encod&eacute; fictif &amp;amp; test&lt;/p&gt;");
+
+      StringAssert.Contains(body, "<p>Message encodé fictif &amp; test</p>");
+      Assert.IsFalse(body.Contains("&lt;"), "entities must be decoded into real tags");
+      Assert.IsFalse(body.Contains("<strong>From</strong>"), "summary header block must be dropped");
+      Assert.IsFalse(body.Contains("ORIGINAL HTML ENCODED MESSAGE BELOW"));
+    }
+
+    [TestMethod]
+    public async Task ProcessManifest_Eml_RawOriginalWithAmpersands_IsNotDecoded()
+    {
+      var body = await HtmlBodyFor(SesarSummaryHeader + "<body>copie</body>" +
+        "<hr/>ORIGINAL HTML ENCODED MESSAGE BELOW<hr/><br /><body><p>Tom &amp; Jerry &lt;3</p></body>");
+
+      StringAssert.Contains(body, "<p>Tom &amp; Jerry &lt;3</p>", "raw HTML must be kept byte for byte");
+    }
+
+    [TestMethod]
+    public async Task ProcessManifest_Eml_MarkerWithNothingAfter_FallsBackToRenderedCopy()
+    {
+      var body = await HtmlBodyFor(SesarSummaryHeader + "<body><p>Copie rendue fictive.</p></body>" +
+        "<hr/>ORIGINAL HTML ENCODED MESSAGE BELOW<hr/><br />   ");
+
+      StringAssert.StartsWith(body, "<body>");
+      StringAssert.Contains(body, "Copie rendue fictive.");
+      Assert.IsFalse(body.Contains("<strong>From</strong>"), "summary header block must be dropped");
+      Assert.IsFalse(body.Contains("ORIGINAL HTML ENCODED MESSAGE BELOW"));
+    }
+
+    [TestMethod]
+    public async Task ProcessManifest_Eml_HtmlWithoutMarker_KeepsMessageWithoutSummaryHeader()
+    {
+      var body = await HtmlBodyFor(SesarSummaryHeader + "<body><p>Sans marqueur, le message est garde.</p></body>");
+
+      StringAssert.StartsWith(body, "<body>");
+      StringAssert.Contains(body, "Sans marqueur, le message est garde.");
+      Assert.IsFalse(body.Contains("<strong>From</strong>"), "summary header block must be dropped");
+      Assert.IsFalse(body.Contains("<strong>Date</strong>"), "summary header block must be dropped");
+    }
+
+    [TestMethod]
+    public async Task ProcessManifest_Eml_HtmlWithoutMarkerNorHeader_IsKeptWhole()
+    {
+      var body = await HtmlBodyFor("<body><p>Sans marqueur, tout est garde.</p></body>");
+
+      Assert.AreEqual("<body><p>Sans marqueur, tout est garde.</p></body>", body.Trim());
     }
 
     [TestMethod]
@@ -468,7 +556,7 @@ namespace SESARWebHook.Tests
       Assert.IsTrue(result.Success, result.Message + " / " + result.ErrorDetails);
       var eml = LoadEml(result);
       Assert.AreEqual(0, eml.From.Count);
-      Assert.AreEqual(0, eml.To.Count);
+      Assert.AreEqual(0, eml.Bcc.Count);
       Assert.AreEqual(1, eml.Attachments.Count());
     }
 
@@ -598,6 +686,55 @@ namespace SESARWebHook.Tests
       var folder = FilesFolderOf(result);
       CollectionAssert.AreEqual(new byte[] { 1 }, File.ReadAllBytes(Path.Combine(folder, "same.txt")));
       CollectionAssert.AreEqual(new byte[] { 2 }, File.ReadAllBytes(Path.Combine(folder, "same (1).txt")));
+    }
+
+    [TestMethod]
+    public async Task ProcessManifest_EntryWithoutFullPath_FallsBackToDirectoryPathAndFileName()
+    {
+      // Cas SESAR : un fichier au contenu identique a un autre du meme envoi est laisse avec
+      // FullPath null et IsDownloaded false, mais son .secf est bien present dans DirectoryPath.
+      var content = new byte[] { 4, 2 };
+      var first = WriteEncrypted("Doublon (1).csv", content);
+      WriteEncrypted("Doublon (2).csv", content);
+
+      var manifest = new StoreManifest
+      {
+        DirectoryPath = _sourceDir,
+        FilesLocation = new List<FileLocation>
+        {
+          new FileLocation { FileName = "Doublon (1).csv", FullPath = first, IsDownloaded = true },
+          new FileLocation { FileName = "Doublon (2).csv", FullPath = null, IsDownloaded = false }
+        },
+        FilesMetaData = new List<FileMetaData>
+        {
+          new FileMetaData { RealFileName = "Doublon (1).csv" },
+          new FileMetaData { RealFileName = "Doublon (2).csv" }
+        }
+      };
+
+      var result = await _separateConnector.ProcessManifestAsync(manifest, NewContext());
+
+      Assert.IsTrue(result.Success, result.Message + " / " + result.ErrorDetails);
+      Assert.AreEqual(2, result.Metadata["FilesDecrypted"]);
+      Assert.AreEqual(0, result.Metadata["FilesFailed"]);
+      var folder = FilesFolderOf(result);
+      CollectionAssert.AreEqual(content, File.ReadAllBytes(Path.Combine(folder, "Doublon (1).csv")));
+      CollectionAssert.AreEqual(content, File.ReadAllBytes(Path.Combine(folder, "Doublon (2).csv")));
+    }
+
+    [TestMethod]
+    public async Task ProcessManifest_EntryWithoutFullPathNorDirectoryPath_IsReportedAsFailed()
+    {
+      var manifest = new StoreManifest
+      {
+        FilesLocation = new List<FileLocation> { new FileLocation { FileName = "orphelin.csv" } }
+      };
+
+      var result = await _separateConnector.ProcessManifestAsync(manifest, NewContext());
+
+      Assert.IsFalse(result.Success);
+      Assert.AreEqual(1, result.Metadata["FilesFailed"]);
+      StringAssert.Contains(result.ErrorDetails, "neither FullPath nor FileName");
     }
 
     [TestMethod]

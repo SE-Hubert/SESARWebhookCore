@@ -3,6 +3,7 @@ using SecureExchangesSDK.Models.Messenging;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Net;
 using System.Text.RegularExpressions;
 
 namespace SESARWebHook.Connectors.FileSystem
@@ -18,6 +19,27 @@ namespace SESARWebHook.Connectors.FileSystem
     public const string EmailHtmlFileName = "EmailSent.html";
 
     private static readonly TimeSpan RegexTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Structure d'un EmailSent.html SESAR : un bloc resume (From, To, Subject, Date), une copie
+    /// rendue du message (groupe "rendered"), puis le marqueur
+    /// "&lt;hr/&gt;ORIGINAL HTML ENCODED MESSAGE BELOW&lt;hr/&gt;&lt;br /&gt;", suivi du message
+    /// original, tantot en HTML brut, tantot encode en entites HTML (&amp;lt;p&amp;gt;...).
+    /// Delai impose pour se proteger d'un HTML pathologique.
+    /// </summary>
+    private static readonly Regex OriginalMessageMarker = new Regex(
+      @"^(?<rendered>.*?)<hr\s*/?>\s*ORIGINAL\s+HTML\s+ENCODED\s+MESSAGE\s+BELOW\s*(?:<hr\s*/?>)?\s*(?:<br\s*/?>)?\s*",
+      RegexOptions.Singleline | RegexOptions.IgnoreCase,
+      RegexTimeout);
+
+    /// <summary>
+    /// Bloc resume place par SESAR en tete du HTML : une suite de paragraphes
+    /// "&lt;p&gt;&lt;strong&gt;From&lt;/strong&gt;: ...&lt;/p&gt;" pour From, To, Subject et Date.
+    /// </summary>
+    private static readonly Regex SummaryHeaderBlock = new Regex(
+      @"^\s*(?:<p\b[^>]*>\s*<strong>\s*(?:From|To|Subject|Date)\s*</strong>.*?</p>\s*)+",
+      RegexOptions.Singleline | RegexOptions.IgnoreCase,
+      RegexTimeout);
 
     private readonly SecfFileDecryptor _decryptor;
     private readonly long _maxAttachmentsTotalSize;
@@ -116,6 +138,8 @@ namespace SESARWebHook.Connectors.FileSystem
 
     /// <summary>
     /// Cree le message avec expediteur, sujet, date et destinataires tires du manifest.
+    /// Les destinataires SESAR sont places en Cci (Bcc), jamais en A (To) : le .eml est une archive
+    /// de l'echange et ne doit pas exposer la liste des destinataires les uns aux autres.
     /// Une adresse invalide est ignoree plutot que de faire echouer le courriel.
     /// </summary>
     private static MimeMessage CreateEnvelope(StoreManifest manifest)
@@ -143,9 +167,9 @@ namespace SESARWebHook.Connectors.FileSystem
       {
         foreach (var r in manifest.Recipients)
         {
-          if (r != null && TryParseMailbox(r.Email, out var to))
+          if (r != null && TryParseMailbox(r.Email, out var recipient))
           {
-            message.To.Add(to);
+            message.Bcc.Add(recipient);
           }
         }
       }
@@ -209,14 +233,59 @@ namespace SESARWebHook.Connectors.FileSystem
         return null;
       }
 
-      if (html == null)
+      return html == null ? null : ExtractOriginalMessage(html);
+    }
+
+    /// <summary>
+    /// Retourne le HTML du courriel original, sans le bloc resume From/To/Subject/Date.
+    ///
+    /// 1. Avec marqueur et contenu apres lui : ce contenu est le message original. S'il est encode en
+    ///    entites HTML (cas ou SESAR affiche "&amp;lt;p&amp;gt;..." au lieu de balises), il est decode.
+    /// 2. Sinon : la copie rendue qui precede le marqueur (ou tout le HTML s'il n'y a pas de
+    ///    marqueur), debarrassee du bloc resume.
+    /// </summary>
+    private static string ExtractOriginalMessage(string html)
+    {
+      var match = OriginalMessageMarker.Match(html);
+
+      if (match.Success)
       {
-        return null;
+        var original = html.Substring(match.Length).Trim();
+        if (original.Length > 0)
+        {
+          return LooksHtmlEncoded(original) ? WebUtility.HtmlDecode(original) : original;
+        }
       }
 
-      // SESAR ajoute a la fin du HTML une copie encodee du message original ; on la retire,
-      // comme le fait le connecteur OneDrive. Delai impose pour se proteger d'un HTML pathologique.
-      return Regex.Replace(html, @"<hr\s*\/>ORIGINAL\sHTML\sENCODED\sMESSAGE\sBELOW.*", string.Empty, RegexOptions.Singleline, RegexTimeout);
+      var rendered = match.Success ? match.Groups["rendered"].Value : html;
+      return SummaryHeaderBlock.Replace(rendered, string.Empty, 1);
+    }
+
+    /// <summary>
+    /// Vrai quand le fragment est du HTML encode en entites plutot que du HTML brut : il contient
+    /// des "&amp;lt;" et au moins autant que de vrais "&lt;". Decoder du HTML brut casserait ses
+    /// "&amp;amp;", d'ou ce test avant de decoder.
+    /// </summary>
+    private static bool LooksHtmlEncoded(string fragment)
+    {
+      var encodedTags = CountOccurrences(fragment, "&lt;");
+      if (encodedTags == 0)
+      {
+        return false;
+      }
+
+      var rawTags = CountOccurrences(fragment, "<");
+      return encodedTags >= rawTags;
+    }
+
+    private static int CountOccurrences(string text, string value)
+    {
+      int count = 0;
+      for (int i = text.IndexOf(value, StringComparison.Ordinal); i >= 0; i = text.IndexOf(value, i + value.Length, StringComparison.Ordinal))
+      {
+        count++;
+      }
+      return count;
     }
 
     /// <summary>Analyse une adresse courriel ; retourne false pour une valeur vide ou invalide.</summary>
