@@ -21,6 +21,15 @@ namespace SESARWebHook.API.Controllers
   [Route("api/webhook")]
   public class WebhookController : ControllerBase
   {
+    /// <summary>
+    /// Message unique renvoye pour tout echec de traitement.
+    ///
+    /// Volontairement non specifique : distinguer "dechiffrement echoue" de "fichier introuvable"
+    /// fournirait a un appelant non authentifie un oracle sur le contenu du payload et sur le
+    /// systeme de fichiers. Le detail reel est journalise cote serveur.
+    /// </summary>
+    private const string GenericFailureMessage = "Le traitement de la requete a echoue.";
+
     private readonly StartupConfig _config;
     private readonly IConfiguration _appConfig;
     private readonly ILogger<WebhookController> _logger;
@@ -318,7 +327,16 @@ namespace SESARWebHook.API.Controllers
       _logger.LogError(
           "Echec du webhook. Connecteur={ConnectorId} Message={Message} Echecs={ItemsFailed} Detail={ErrorDetails}",
           connectorId, result.Message, result.ItemsFailed, result.ErrorDetails);
-      return StatusCode(500, result);
+
+      // Reponse a l'appelant : message generique. Le Message du connecteur contient des chemins
+      // de fichiers et l'echec de validation de la HashKey passe aussi par ici : un appelant non
+      // authentifie ne doit obtenir aucune information sur le systeme ni sur la cause du refus.
+      return StatusCode(500, new
+      {
+        Success = false,
+        Message = GenericFailureMessage,
+        ConnectorId = connectorId
+      });
     }
   }
 }
