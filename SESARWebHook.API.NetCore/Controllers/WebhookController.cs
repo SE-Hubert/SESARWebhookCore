@@ -315,9 +315,20 @@ namespace SESARWebHook.API.Controllers
 
       if (result.Success)
       {
-        _logger.LogInformation(
-            "Webhook traite. Connecteur={ConnectorId} Message={Message} Traites={ItemsProcessed}",
-            connectorId, result.Message, result.ItemsProcessed);
+        if (result.ItemsProcessed == 0)
+        {
+          // Succes sans action (ex. manifest sans destinataire de redirection) : en avertissement,
+          // pour rester visible dans le journal Windows quand le service tourne sans console.
+          _logger.LogWarning(
+              "Webhook traite sans action. Connecteur={ConnectorId} Message={Message}",
+              connectorId, result.Message);
+        }
+        else
+        {
+          _logger.LogInformation(
+              "Webhook traite. Connecteur={ConnectorId} Message={Message} Traites={ItemsProcessed}",
+              connectorId, result.Message, result.ItemsProcessed);
+        }
         return Ok(result);
       }
 

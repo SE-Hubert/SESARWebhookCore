@@ -1,7 +1,9 @@
 # SESAR WebHook - Guide d'installation
 
-Ce paquet installe un service Windows qui reçoit les webhooks de SESAR et reconstruit chaque
-échange en fichier `.eml` sur le disque local, pièces jointes déchiffrées incluses.
+Ce paquet installe un service Windows qui reçoit les webhooks de SESAR, déchiffre chaque échange
+(corps et pièces jointes) et le renvoie par Secure Exchanges à l'adresse indiquée dans le paramètre
+`RedirectionEmail` des CallBackParameters du message. Après l'envoi, le dossier d'échange SESAR est
+supprimé et une notification est envoyée aux adresses configurées. Rien ne reste sur le disque.
 
 ## Prérequis
 
@@ -50,12 +52,26 @@ courriel ni déposé dans un dépôt de code. Il contient au minimum:
 {
   "WebHookEncryptionKey": "<clé webhook en base64>",
   "WebHookEncryptionIV": "<IV webhook en base64>",
-  "PrivateAESKey": "<clé fichiers base64>_<IV fichiers base64>"
+  "PrivateAESKey": "<clé fichiers base64>_<IV fichiers base64>",
+  "Connectors": {
+    "filesystem": {
+      "Secrets": {
+        "Serial": "<GUID de la licence Secure Exchanges>",
+        "ApiUser": "<GUID de l'utilisateur API>",
+        "ApiPassword": "<GUID du mot de passe API>",
+        "NotificationEmails": "archives@exemple.com, direction@exemple.com"
+      }
+    }
+  }
 }
 ```
 
 Les deux premières valeurs déchiffrent les appels de SESAR. La troisième déchiffre les pièces
-jointes. Elles proviennent de votre configuration SESAR.
+jointes. Elles proviennent de votre configuration SESAR. `Serial`, `ApiUser` et `ApiPassword` sont
+les identifiants API de votre compte d'affaires Secure Exchanges, avec lesquels le service renvoie
+les courriels. `NotificationEmails` est la liste, séparée par des virgules, des adresses avisées
+après chaque redirection; laissez la chaîne vide pour ne pas être avisé. Toutes ces valeurs sont
+des chaînes de caractères, jamais des tableaux JSON.
 
 **Déposez ce fichier en clair dans le dossier décompressé**, à côté de
 `Install-SESARWebHook.ps1`. Le script le trouvera tout seul et le placera à la racine du dossier
@@ -104,8 +120,11 @@ Si votre fichier de secrets se trouve ailleurs, indiquez son chemin:
 ```
 
 Si vous avez déjà un `appsettings.json` configuré à votre façon, fournissez-le. Ses valeurs sont
-reprises telles quelles: dossier de sortie, connecteurs actifs, journalisation. L'installation
-n'impose que le point d'écoute et le certificat.
+reprises telles quelles: dossier de travail, point d'accès Secure Exchanges, connecteurs actifs,
+journalisation. L'installation n'impose que le point d'écoute et le certificat. Réglez au moins
+`Connector:filesystem:SesarStoreRoot` sur le dossier de stockage de SESAR (par exemple
+`C:\SESAR\Store\received`): seul un dossier d'échange situé sous cette racine peut être supprimé
+après l'envoi.
 
 ```powershell
 .\Install-SESARWebHook.ps1 -AppSettingsFile D:\Config\appsettings.json
@@ -123,8 +142,8 @@ TLS, configuration du poste, enregistrement du service, vérification.
 | Paramètre | Défaut | Rôle |
 |---|---|---|
 | `-InstallPath` | `C:\Program Files\SESARWebHook` | Application et fichier de secrets |
-| `-DataPath` | `C:\SESARWebHook` | Dossier parent par défaut des courriels |
-| `-OutputPath` | valeur d'`appsettings.json` | Impose le dossier des courriels reconstruits |
+| `-DataPath` | `C:\SESARWebHook` | Dossier parent par défaut du dossier de travail |
+| `-OutputPath` | valeur d'`appsettings.json` | Impose le dossier de travail où les fichiers sont déchiffrés le temps de l'envoi |
 | `-AppSettingsFile` | aucun | Votre `appsettings.json` déjà configuré |
 | `-SecretsFile` | le fichier à côté du script | Votre `connectors.secrets.json` |
 | `-RemoveSourceSecrets` | désactivé | Supprime la copie en clair après installation |
@@ -153,10 +172,17 @@ Invoke-RestMethod https://localhost:5001/api/health/status
 
 `ProcessorInitialized` et `SecretsFileFound` doivent valoir `True`.
 
-2. Envoyez un courriel de test avec une pièce jointe depuis SESAR.
+2. Envoyez un courriel de test avec une pièce jointe depuis SESAR, en plaçant dans les
+CallBackParameters du message la valeur `RedirectionEmail=<votre adresse de test>`.
 
-3. Vérifiez qu'un fichier `.eml` apparaît dans `C:\SESARWebHook\Output\<date>\`, nommé d'après
-le sujet et la date d'envoi. Ouvrez-le: le message et ses pièces jointes doivent être lisibles.
+3. Vérifiez que l'adresse de test reçoit un message Secure Exchanges portant le sujet, le corps et
+la pièce jointe d'origine, que les adresses de `NotificationEmails` reçoivent la « Notification de
+redirection d'enveloppe », et que le dossier de l'échange a disparu du stockage SESAR. Le dossier de
+travail `C:\SESARWebHook\Output\` doit être vide.
+
+Un message sans `RedirectionEmail` est accepté sans rien faire. Un message dont l'adresse est mal
+formée, ou dont une pièce jointe ne peut pas être déchiffrée, est refusé sans envoi: SESAR le
+présentera de nouveau et le journal indique la cause.
 
 ## Exploitation
 
@@ -181,12 +207,16 @@ Le fichier voisin `appsettings.Production.json` ne contient que le point d'écou
 certificat, que l'installation prépare elle-même. Il l'emporte sur `appsettings.json` pour ces
 deux éléments seulement, ainsi que sur le dossier de sortie si vous avez passé `-OutputPath`.
 
-**Fichiers volumineux.** Quand le total des pièces jointes d'un échange dépasse 2 Go, elles ne
-sont pas jointes au `.eml`. Elles sont déposées dans un dossier portant le même nom que le
-`.eml`, à côté de celui-ci.
+**Fichiers volumineux.** Un échange dont les pièces jointes totalisent plus de 2,5 Go (réglage
+`MaxTotalSizeBytes`) est refusé sans envoi, conformément à la limite de Secure Exchanges.
 
-**Espace disque.** Les courriels produits s'accumulent dans le dossier de sortie. Prévoyez une
-rétention et une purge selon vos obligations de conservation.
+**Espace disque.** Le dossier de travail ne garde rien: les fichiers déchiffrés sont effacés après
+chaque envoi, réussi ou non. Prévoyez tout de même l'espace du plus gros échange attendu.
+
+**Suppression des échanges.** Après un envoi réussi, le service supprime le dossier de l'échange
+dans le stockage SESAR, manifest inclus. Le réglage `DeleteSourceAfterForward` à `false` désactive
+cette suppression. Si un dossier ne peut pas être supprimé, l'envoi reste valide et la cause est
+inscrite dans le journal.
 
 ## Mise à jour
 

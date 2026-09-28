@@ -90,3 +90,7 @@ _ReSharper*/
 connectors.secrets.json
 # Paquets d installation produits par deploy/Build-Package.ps1
 deploy/artifacts/
+
+# Toute variante locale du fichier de secrets, sauf le gabarit
+connectors.secrets*.json
+!connectors.secrets.template.json

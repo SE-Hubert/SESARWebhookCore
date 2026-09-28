@@ -76,10 +76,13 @@ if ($testArtifacts) {
          (($testArtifacts | Select-Object -ExpandProperty Name) -join ', '))
 }
 
-# Aucun secret ne doit se retrouver dans le paquet.
-$secretFiles = Get-ChildItem -Path $appDir -Recurse -File -Filter 'connectors.secrets.json'
+# Aucun secret ne doit se retrouver dans le paquet : tout fichier connectors.secrets*.json
+# autre que le gabarit est un secret (copies locales, sauvegardes, variantes par poste).
+$secretFiles = Get-ChildItem -Path $appDir -Recurse -File -Filter 'connectors.secrets*.json' |
+  Where-Object { $_.Name -ne 'connectors.secrets.template.json' }
 if ($secretFiles) {
-  throw 'Un fichier connectors.secrets.json est present dans la publication : il ne doit jamais etre distribue.'
+  throw ("Des fichiers de secrets sont presents dans la publication, ils ne doivent jamais etre distribues : " +
+         (($secretFiles | Select-Object -ExpandProperty Name) -join ', '))
 }
 
 $exe = Join-Path $appDir 'SESARWebHook.API.NetCore.exe'

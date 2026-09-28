@@ -9,37 +9,56 @@ using System.Threading.Tasks;
 namespace SESARWebHook.Connectors.FileSystem
 {
   /// <summary>
-  /// Connecteur qui reconstruit sur le disque local le courriel d'un echange SESAR.
+  /// Connecteur qui renvoie, par Secure Exchanges, le courriel d'un echange SESAR au destinataire
+  /// indique dans le CallBackParameter du manifest.
   ///
-  /// Pour chaque manifest recu :
-  ///  1. <see cref="ManifestFileDeliverer"/> recupere les fichiers : copie s'ils existent en clair,
-  ///     sinon dechiffrement de leur version ".secf" par <see cref="SecfFileDecryptor"/> ;
-  ///  2. <see cref="EmlBuilder"/> reconstruit le courriel en ".eml" : corps depuis EmailSent.html,
-  ///     expediteur, destinataires, sujet et date depuis le manifest ;
-  ///  3. si le total des fichiers ne depasse pas EmlMaxTotalSizeBytes, ils sont attaches au .eml ;
-  ///     sinon ils restent dans un dossier portant le meme nom que le .eml, a cote.
-  ///
-  /// Nom produit (<see cref="OutputNaming"/>) : "&lt;sujet&gt; - &lt;date d'envoi yyyy-MM-dd HH-mm&gt;.eml".
+  /// Pour chaque manifest recu (<see cref="ManifestForwarder"/>) :
+  ///  1. l'adresse de transfert est tiree du CallBackParameter et validee ;
+  ///  2. le corps (EmailSent.html) et les fichiers .secf sont dechiffres avec la PrivateAESKey dans
+  ///     un sous-dossier temporaire de OutputPath ;
+  ///  3. sujet, corps HTML original et fichiers sont envoyes par le SDK Secure Exchanges
+  ///     (MessageHelper.MultiRecipientMessage) ; si quelque chose manque, rien n'est envoye ;
+  ///  4. apres un envoi reussi, le dossier d'echange SESAR (DirectoryPath, manifest inclus) est
+  ///     supprime et une notification est envoyee a NotificationEmails ;
+  ///  5. le sous-dossier temporaire est efface, envoi reussi ou non. Rien ne reste sur le disque.
   ///
   /// Configuration (appsettings.json, section Connector:filesystem) :
-  ///   OutputPath            dossier de sortie (obligatoire)
-  ///   CreateSubfolders      "true" pour un sous-dossier par jour (yyyy-MM-dd)
-  ///   EmlMaxTotalSizeBytes  limite d'attachement en octets, defaut 2 Gio
-  /// Secret (connectors.secrets.json) :
-  ///   PrivateAESKey         "base64key_base64iv", global ou propre au connecteur
+  ///   OutputPath                dossier de travail temporaire (obligatoire)
+  ///   EndPointUri               point d'acces de l'API Secure Exchanges (https ; http tolere sur localhost seulement)
+  ///   DeleteSourceAfterForward  "true" (defaut) pour supprimer le dossier d'echange SESAR apres l'envoi
+  ///   SesarStoreRoot            racine du magasin SESAR ; seul un dossier sous cette racine peut etre supprime
+  ///   CultureID, MaximumOpenTime, MinutesExpiration, GetNotify, ShowSubject, MaxTotalSizeBytes,
+  ///   RecipientParameterKey, SenderName
+  /// Secrets (connectors.secrets.json, Connectors:filesystem:Secrets) :
+  ///   Serial, ApiUser, ApiPassword   identifiants API Secure Exchanges
+  ///   NotificationEmails             adresses avisees apres chaque transfert, separees par des virgules
+  ///   PrivateAESKey                  "base64key_base64iv", propre au connecteur, sinon la cle globale
   /// </summary>
   public class FileSystemConnector : IIntegrationConnector
   {
+    private readonly Func<ForwardOptions, ISecureMessageSender> _senderFactory;
+
     private FileSystemConnectorOptions _options;
-    private ManifestFileDeliverer _deliverer;
-    private EmlBuilder _emlBuilder;
+    private ManifestForwarder _forwarder;
 
     public string ConnectorId => "filesystem";
     public string DisplayName => "File System";
-    public string Description => "Rebuilds each SESAR exchange as a .eml file (decrypted attachments included) on the local file system";
-    public string Version => "2.0.0";
+    public string Description => "Decrypts each SESAR exchange (body and files) and re-sends it through Secure Exchanges to the recipient given in the manifest CallBackParameter";
+    public string Version => "3.0.0";
 
-    public IEnumerable<string> RequiredConfigurationKeys => new[] { "OutputPath" };
+    public IEnumerable<string> RequiredConfigurationKeys => new[] { "OutputPath", "Serial", "ApiUser", "ApiPassword" };
+
+    /// <summary>Connecteur de production : envoi par le SDK Secure Exchanges.</summary>
+    public FileSystemConnector()
+      : this(options => new SecureExchangesMessageSender(options))
+    {
+    }
+
+    /// <summary>Permet de substituer l'envoyeur (tests sans reseau).</summary>
+    public FileSystemConnector(Func<ForwardOptions, ISecureMessageSender> senderFactory)
+    {
+      _senderFactory = senderFactory ?? throw new ArgumentNullException(nameof(senderFactory));
+    }
 
     #region Configuration
 
@@ -51,21 +70,35 @@ namespace SESARWebHook.Connectors.FileSystem
     {
       _options = FileSystemConnectorOptions.FromSettings(settings);
 
-      var decryptor = new SecfFileDecryptor(_options.Key, _options.Iv);
-      _deliverer = new ManifestFileDeliverer(decryptor);
-      _emlBuilder = new EmlBuilder(decryptor, _options.EmlMaxTotalSizeBytes);
+      var deliverer = new ManifestFileDeliverer(_options.Decryptor);
+      var bodyReader = new EmailBodyReader(_options.Decryptor);
+      var sender = _senderFactory(_options.Forward) ?? throw new InvalidOperationException("sender factory returned null");
+      _forwarder = new ManifestForwarder(_options.Forward, deliverer, bodyReader, sender, ConnectorId);
     }
 
-    /// <summary>Valide la presence d'un OutputPath non vide.</summary>
+    /// <summary>Valide l'ensemble des parametres (OutputPath, identifiants API, point d'acces) sans initialiser.</summary>
     public Task<bool> ValidateConfigurationAsync(Dictionary<string, string> settings)
     {
-      var valid = settings != null
-                  && settings.ContainsKey("OutputPath")
-                  && !string.IsNullOrWhiteSpace(settings["OutputPath"]);
-      return Task.FromResult(valid);
+      if (settings == null || !settings.TryGetValue("OutputPath", out var outputPath) || string.IsNullOrWhiteSpace(outputPath))
+      {
+        return Task.FromResult(false);
+      }
+
+      try
+      {
+        FileSystemConnectorOptions.FromSettings(settings);
+        return Task.FromResult(true);
+      }
+      catch (Exception)
+      {
+        return Task.FromResult(false);
+      }
     }
 
-    /// <summary>Verifie que le dossier de sortie existe (ou peut etre cree) et est accessible en ecriture.</summary>
+    /// <summary>
+    /// Verifie que le dossier de travail existe (ou peut etre cree) et est accessible en ecriture.
+    /// Aucun appel a Secure Exchanges : un test ne doit jamais provoquer d'envoi.
+    /// </summary>
     public Task<bool> TestConnectionAsync()
     {
       if (_options == null)
@@ -91,12 +124,9 @@ namespace SESARWebHook.Connectors.FileSystem
 
     #endregion
 
-    #region Traitement du manifest
-
     /// <summary>
-    /// Point d'entree : livre les fichiers, reconstruit le .eml et rend compte du resultat.
-    /// Un fichier en echec n'interrompt pas les autres ; le resultat global est alors en echec
-    /// avec le detail dans ErrorDetails (journal seulement, jamais renvoye au client).
+    /// Point d'entree : transfere le courriel par Secure Exchanges. Le detail des echecs va dans
+    /// ErrorDetails (journal seulement, jamais renvoye au client).
     /// </summary>
     public async Task<IntegrationResult> ProcessManifestAsync(StoreManifest manifest, WebhookContext context)
     {
@@ -107,108 +137,14 @@ namespace SESARWebHook.Connectors.FileSystem
 
       try
       {
-        var outputFolder = PrepareOutputFolder();
-
-        // Nom de base commun au .eml et au dossier de fichiers, unique dans le dossier de sortie
-        var baseName = OutputNaming.MakeUniqueBaseName(outputFolder, OutputNaming.BuildBaseName(manifest));
-        var emlPath = SafePaths.GetSafeDestinationPath(outputFolder, baseName + OutputNaming.EmlExtension);
-        var filesFolder = SafePaths.GetSafeDestinationPath(outputFolder, baseName);
-
-        var report = await Task.Run(() =>
-        {
-          var r = _deliverer.Deliver(manifest, filesFolder);
-          _emlBuilder.Build(manifest, outputFolder, filesFolder, emlPath, r);
-          FileSystemCleanup.RemoveFolderIfEmpty(filesFolder);
-          return r;
-        });
-
-        return BuildResult(report, filesFolder);
+        Directory.CreateDirectory(_options.OutputPath);
       }
       catch (Exception ex)
       {
-        return IntegrationResult.Fail("Failed to write email to file system", ex.Message, ConnectorId);
+        return IntegrationResult.Fail("Failed to prepare the work folder", ex.Message, ConnectorId);
       }
+
+      return await _forwarder.ForwardAsync(manifest, _options.OutputPath);
     }
-
-    /// <summary>Cree le dossier de sortie, avec un sous-dossier par jour si CreateSubfolders est actif.</summary>
-    private string PrepareOutputFolder()
-    {
-      var outputFolder = _options.OutputPath;
-      if (_options.CreateSubfolders)
-      {
-        outputFolder = Path.Combine(_options.OutputPath, DateTime.Now.ToString("yyyy-MM-dd"));
-      }
-
-      Directory.CreateDirectory(outputFolder);
-      return outputFolder;
-    }
-
-    /// <summary>Traduit le rapport interne en IntegrationResult, avec les compteurs en metadonnees.</summary>
-    private IntegrationResult BuildResult(DeliveryReport report, string filesFolder)
-    {
-      var folderKept = Directory.Exists(filesFolder);
-
-      var metadata = new Dictionary<string, object>
-      {
-        { "EmlPath", report.EmlPath },
-        { "FilesFolder", folderKept ? filesFolder : null },
-        { "FilesDeliveryMode", report.DeliveryMode.ToString().ToLowerInvariant() },
-        { "FilesTotal", report.TotalFiles },
-        { "FilesTotalSize", report.TotalSize },
-        { "FilesCopied", report.Copied },
-        { "FilesDecrypted", report.Decrypted },
-        { "FilesFailed", report.Failed }
-      };
-
-      var itemsProcessed = (report.EmlPath != null ? 1 : 0) + report.Copied + report.Decrypted;
-      var reference = report.EmlPath ?? (folderKept ? filesFolder : null);
-
-      if (report.HasFailures)
-      {
-        var problem = report.Failed > 0
-          ? $"{report.Failed} of {report.TotalFiles} file(s) could not be delivered"
-          : "the .eml could not be built";
-
-        return new IntegrationResult
-        {
-          Success = false,
-          Message = report.EmlPath != null ? $"Email written to {report.EmlPath} but {problem}" : $"Processing failed: {problem}",
-          ErrorDetails = string.Join(Environment.NewLine, report.Errors),
-          ConnectorId = ConnectorId,
-          ExternalReferenceId = reference,
-          ItemsProcessed = itemsProcessed,
-          ItemsFailed = report.Failed + (report.EmlFailed ? 1 : 0),
-          Metadata = metadata
-        };
-      }
-
-      string message;
-      switch (report.DeliveryMode)
-      {
-        case FilesDeliveryMode.Eml:
-          message = $"Email rebuilt to {report.EmlPath} with {report.TotalFiles} attachment(s)";
-          break;
-        case FilesDeliveryMode.Separate:
-          message = $"Email rebuilt to {report.EmlPath}, {report.TotalFiles} file(s) kept in {filesFolder} (total size over limit)";
-          break;
-        default:
-          message = report.EmlPath != null
-            ? $"Email rebuilt to {report.EmlPath}"
-            : "Manifest contained no email information and no files; nothing written";
-          break;
-      }
-
-      return new IntegrationResult
-      {
-        Success = true,
-        Message = message,
-        ConnectorId = ConnectorId,
-        ExternalReferenceId = reference,
-        ItemsProcessed = itemsProcessed,
-        Metadata = metadata
-      };
-    }
-
-    #endregion
   }
 }
