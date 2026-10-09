@@ -882,6 +882,8 @@ namespace SESARWebHook.Tests
       StringAssert.Contains(notification.HtmlBody, "Contrat &amp; fictif.pdf", "file names must be html-encoded");
       StringAssert.Contains(notification.HtmlBody, "&lt;script&gt;", "subject must be html-encoded");
       Assert.IsFalse(notification.HtmlBody.Contains("<script>"), "raw tags from the manifest must never reach the notification");
+      StringAssert.Contains(notification.HtmlBody, "2026-09-22 10:18", "CreateOn is UTC on the server and must be shown in Eastern time (EDT in September)");
+      Assert.IsFalse(notification.HtmlBody.Contains("14:18"), "the raw UTC time must not be shown");
       Assert.AreEqual(true, result.Metadata["NotificationSent"]);
     }
 

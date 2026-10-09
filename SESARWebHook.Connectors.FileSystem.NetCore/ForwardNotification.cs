@@ -35,7 +35,7 @@ namespace SESARWebHook.Connectors.FileSystem
       body.Append("<table>");
       AppendRow(body, "Sujet", subject);
       AppendRow(body, "Expediteur original", info?.ContactInfo);
-      AppendRow(body, "Envoye le", info != null && info.CreateOn != default(DateTime) ? info.CreateOn.ToString("yyyy-MM-dd HH:mm") : null);
+      AppendRow(body, "Envoye le", info != null && info.CreateOn != default(DateTime) ? FormatLocalDate(info.CreateOn) : null);
       AppendRow(body, "Transfere a", forwardedTo);
       AppendRow(body, "Fichiers", fileNames.Count == 0 ? "aucun" : fileNames.Count + " : " + string.Join(", ", fileNames));
       AppendRow(body, "Identifiant de suivi", trackingId);
@@ -50,6 +50,48 @@ namespace SESARWebHook.Connectors.FileSystem
         FilePaths = new List<string>(),
         SenderName = string.IsNullOrWhiteSpace(options.SenderName) ? null : options.SenderName
       };
+    }
+
+    /// <summary>
+    /// Fuseau d'affichage de la date d'envoi. Le serveur Secure Exchanges stocke CreateOn en UTC ;
+    /// la notification est lue au Quebec, donc on convertit vers l'heure de l'Est plutot que
+    /// d'afficher l'heure UTC ou celle, arbitraire, du serveur qui heberge le webhook.
+    /// </summary>
+    private const string DisplayTimeZoneWindowsId = "Eastern Standard Time";
+    private const string DisplayTimeZoneIanaId = "America/Toronto";
+
+    private static readonly Lazy<TimeZoneInfo> DisplayTimeZone = new Lazy<TimeZoneInfo>(ResolveDisplayTimeZone);
+
+    private static TimeZoneInfo ResolveDisplayTimeZone()
+    {
+      foreach (var id in new[] { DisplayTimeZoneWindowsId, DisplayTimeZoneIanaId })
+      {
+        try
+        {
+          return TimeZoneInfo.FindSystemTimeZoneById(id);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+        }
+        catch (InvalidTimeZoneException)
+        {
+        }
+      }
+      return TimeZoneInfo.Local;
+    }
+
+    /// <summary>
+    /// Formate une date CreateOn pour le courriel. La valeur est traitee comme UTC quel que soit
+    /// son Kind apres desérialisation (Unspecified en pratique), car c'est ainsi que le serveur l'emet.
+    /// </summary>
+    internal static string FormatLocalDate(DateTime createOn)
+    {
+      var utc = createOn.Kind == DateTimeKind.Local
+        ? createOn.ToUniversalTime()
+        : DateTime.SpecifyKind(createOn, DateTimeKind.Utc);
+
+      var local = TimeZoneInfo.ConvertTimeFromUtc(utc, DisplayTimeZone.Value);
+      return local.ToString("yyyy-MM-dd HH:mm");
     }
 
     private static void AppendRow(StringBuilder body, string label, string value)
