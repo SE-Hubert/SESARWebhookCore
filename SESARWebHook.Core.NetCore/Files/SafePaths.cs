@@ -3,13 +3,13 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 
-namespace SESARWebHook.Connectors.FileSystem
+namespace SESARWebHook.Core.Files
 {
   /// <summary>
   /// Construction sure de noms et de chemins a partir de valeurs venues du manifest (sujet, noms de
   /// fichiers). Defense contre la traversee de repertoire et l'ecrasement de fichiers existants.
   /// </summary>
-  internal static class SafePaths
+  public static class SafePaths
   {
     /// <summary>
     /// Reduit une chaine a un nom de fichier nu : aucun composant de repertoire, caracteres invalides

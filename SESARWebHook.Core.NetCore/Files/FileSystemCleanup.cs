@@ -1,13 +1,13 @@
 using System.IO;
 using System.Linq;
 
-namespace SESARWebHook.Connectors.FileSystem
+namespace SESARWebHook.Core.Files
 {
   /// <summary>
   /// Operations de nettoyage "au mieux" : elles ne levent jamais d'exception, pour que l'erreur du
   /// traitement principal, s'il y en a une, reste celle qui est rapportee.
   /// </summary>
-  internal static class FileSystemCleanup
+  public static class FileSystemCleanup
   {
     /// <summary>Supprime le dossier s'il existe et ne contient rien.</summary>
     public static void RemoveFolderIfEmpty(string folder)

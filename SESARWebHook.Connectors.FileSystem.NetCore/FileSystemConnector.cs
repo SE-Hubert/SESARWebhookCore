@@ -1,6 +1,7 @@
 using SecureExchangesSDK.Models.Messenging;
 using SESARWebHook.Core.Interfaces;
 using SESARWebHook.Core.Models;
+using SESARWebHook.Core.Files;
 using System;
 using System.Collections.Generic;
 using System.IO;

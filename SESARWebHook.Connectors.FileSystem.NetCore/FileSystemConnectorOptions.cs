@@ -1,4 +1,5 @@
 using SESARWebHook.Core.Configuration;
+using SESARWebHook.Core.Files;
 using System;
 using System.Collections.Generic;
 
@@ -75,7 +76,7 @@ namespace SESARWebHook.Connectors.FileSystem
 
       if (!string.IsNullOrWhiteSpace(privateAesKey))
       {
-        ParsePrivateAesKey(privateAesKey, out var key, out var iv);
+        PrivateAesKey.Parse(privateAesKey, out var key, out var iv);
         options.Key = key;
         options.Iv = iv;
       }
@@ -87,26 +88,6 @@ namespace SESARWebHook.Connectors.FileSystem
     private static string Get(Dictionary<string, string> settings, string name)
     {
       return settings.TryGetValue(name, out var value) ? value : null;
-    }
-
-    /// <summary>Decode une PrivateAESKey au format SESAR "base64key_base64iv".</summary>
-    private static void ParsePrivateAesKey(string privateAesKey, out byte[] key, out byte[] iv)
-    {
-      var parts = privateAesKey.Split('_');
-      if (parts.Length != 2 || string.IsNullOrEmpty(parts[0]) || string.IsNullOrEmpty(parts[1]))
-      {
-        throw new InvalidOperationException("PrivateAESKey must be in format 'base64key_base64iv' separated by underscore");
-      }
-
-      try
-      {
-        key = Convert.FromBase64String(parts[0]);
-        iv = Convert.FromBase64String(parts[1]);
-      }
-      catch (FormatException ex)
-      {
-        throw new InvalidOperationException("PrivateAESKey must be in format 'base64key_base64iv' with valid base64 strings", ex);
-      }
     }
   }
 }

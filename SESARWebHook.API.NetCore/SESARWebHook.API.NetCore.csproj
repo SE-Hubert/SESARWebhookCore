@@ -14,11 +14,12 @@
   <ItemGroup>
     <!-- En developpement, connectors.secrets.json se place a la racine de ce projet et suit
          vers le dossier de sortie, ou l'application le cherche par defaut. Il n'est jamais
-         publie : aucun paquet livre ne doit contenir de secret. -->
-    <None Update="connectors.secrets.json" Condition="Exists('connectors.secrets.json')">
+         publie : aucun paquet livre ne doit contenir de secret. Le SDK Web classe les *.json
+         en Content (publie par defaut) : la regle doit viser Content, pas None. -->
+    <Content Update="connectors.secrets.json" Condition="Exists('connectors.secrets.json')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>Never</CopyToPublishDirectory>
-    </None>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>

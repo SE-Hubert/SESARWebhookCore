@@ -3,14 +3,14 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 
-namespace SESARWebHook.Connectors.FileSystem
+namespace SESARWebHook.Core.Files
 {
   /// <summary>
   /// Dechiffre les fichiers SESAR ".secf" avec la PrivateAESKey, via le SDK Secure Exchanges.
   /// Le SDK choisit lui-meme le nom du fichier produit : le dechiffrement passe donc par un dossier
   /// temporaire prive, puis le resultat est deplace sous le nom voulu.
   /// </summary>
-  internal sealed class SecfFileDecryptor
+  public sealed class SecfFileDecryptor
   {
     /// <summary>Extension des fichiers chiffres SESAR.</summary>
     public const string Extension = ".secf";

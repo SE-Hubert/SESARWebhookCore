@@ -1,4 +1,5 @@
 using SecureExchangesSDK.Models.Messenging;
+using SESARWebHook.Core.Files;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -38,7 +39,7 @@ namespace SESARWebHook.Connectors.FileSystem
 
       for (int i = 0; i < locations.Count; i++)
       {
-        var sourcePath = ResolveSourcePath(manifest, i);
+        var sourcePath = ManifestFilePaths.ResolveSourcePath(manifest, i);
 
         try
         {
@@ -47,7 +48,7 @@ namespace SESARWebHook.Connectors.FileSystem
             throw new FileNotFoundException("manifest entry has neither FullPath nor FileName");
           }
 
-          var targetName = SafePaths.MakeUniqueFileName(filesFolder, ResolveTargetFileName(manifest, i, sourcePath), usedNames);
+          var targetName = SafePaths.MakeUniqueFileName(filesFolder, ManifestFilePaths.ResolveTargetFileName(manifest, i, sourcePath), usedNames);
           var targetPath = SafePaths.GetSafeDestinationPath(filesFolder, targetName);
 
           if (File.Exists(sourcePath))
@@ -76,62 +77,6 @@ namespace SESARWebHook.Connectors.FileSystem
       }
 
       return report;
-    }
-
-    /// <summary>
-    /// Chemin source du fichier : FullPath de l'entree quand SESAR l'a rempli, sinon
-    /// DirectoryPath + FileName. SESAR laisse FullPath vide (et IsDownloaded a false) pour un
-    /// fichier dont le contenu est identique a un autre du meme envoi, alors que son .secf est bien
-    /// present dans le dossier de l'echange. Retourne null si aucun chemin ne peut etre construit.
-    /// </summary>
-    private static string ResolveSourcePath(StoreManifest manifest, int index)
-    {
-      var location = manifest.FilesLocation[index];
-      if (location == null)
-      {
-        return null;
-      }
-
-      if (!string.IsNullOrWhiteSpace(location.FullPath))
-      {
-        return location.FullPath;
-      }
-
-      var fileName = SafePaths.SanitizeFileName(location.FileName);
-      if (string.IsNullOrWhiteSpace(manifest.DirectoryPath) || string.IsNullOrEmpty(fileName))
-      {
-        return null;
-      }
-
-      return Path.Combine(manifest.DirectoryPath, fileName);
-    }
-
-    /// <summary>
-    /// Nom visible du fichier livre : RealFileName des metadonnees, sinon FileName de l'entree,
-    /// sinon le nom contenu dans FullPath. Toujours reduit a un nom de fichier nu.
-    /// </summary>
-    private static string ResolveTargetFileName(StoreManifest manifest, int index, string sourcePath)
-    {
-      string candidate = null;
-
-      var metaData = manifest.FilesMetaData;
-      if (metaData != null && index < metaData.Count && metaData[index] != null)
-      {
-        candidate = metaData[index].RealFileName;
-      }
-
-      if (string.IsNullOrWhiteSpace(candidate))
-      {
-        candidate = manifest.FilesLocation[index].FileName;
-      }
-
-      if (string.IsNullOrWhiteSpace(candidate))
-      {
-        candidate = Path.GetFileName(sourcePath);
-      }
-
-      var sanitized = SafePaths.SanitizeFileName(candidate);
-      return string.IsNullOrEmpty(sanitized) ? $"file_{index}" : sanitized;
     }
   }
 }
